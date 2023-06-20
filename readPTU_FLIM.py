@@ -11,9 +11,7 @@
 Created on Tue, 14 May 2019
 Updated on Sun, 20 Dec, 2020
 @author: SumeetRohilla, sumeetrohilla@gmail.com
-
 "Good artists copy; great artists steal."
-
 Largely inspired from examples:
 - PicoQuant demo codes
   https://github.com/PicoQuant/PicoQuant-Time-Tagged-File-Format-Demos
@@ -30,6 +28,18 @@ Aim : Open and convert Picoquant .ptu image files for FLIM analysis
  *  3) get_flim_data_stack class method is numba accelarated (using @jit decorator) to gain speed in building flim_data_stack from raw_tttr_data 
  
 """
+'''
+Modified by Tomasz Kalwarczyk tkalwarczyk@ichf.edu.pl  (https://github.com/TKmist)
+Modification:
+  1) Added function converting Picoquant .ptu image files acquired on the older A1 confocal setup with the PicoQuant LSM upgrade kit. In this setup, the Nikon scanner produces additional 15 lines that the SymPhoTime software misinterprets, causing a shift in the image and cutting off the bottom lines. Function 
+      get_flim_data_stack_static_omit()
+  takes additional argument
+      lines_to_skip
+  that shifts the image up. After that operation, the first three lines are drawn at the bottom of the image. Those lines are shifted again to the top of the image.
+'''
+
+
+
 
 
 import time
@@ -42,7 +52,8 @@ from sys import getsizeof
 import gc
 import matplotlib.pyplot as plt
 from numba import njit, jit
-from numba import jitclass
+# from numba import jitclass
+from numba.experimental import jitclass 
 from numba.types import uint16
 
 
@@ -137,6 +148,7 @@ def get_flim_data_stack_static(sync, tcspc, channel, special, header_variables):
                     countFrame   += 1
                     currentLine  = 0
 
+
                 if (special_event == LineStartMarker):
 
                     insideLine = True
@@ -167,6 +179,155 @@ def get_flim_data_stack_static(sync, tcspc, channel, special, header_variables):
 
 
     return flim_data_stack
+
+
+
+@njit
+def get_flim_data_stack_static_omit(sync, tcspc, channel, special, header_variables,lines_to_skip):
+    ImgHdr_Ident              = header_variables[0]
+    MeasDesc_Resolution       = header_variables[1]
+    MeasDesc_GlobalResolution = header_variables[2]
+    ImgHdr_PixX               = header_variables[3]
+    ImgHdr_PixY               = header_variables[4]
+    ImgHdr_LineStart          = header_variables[5]
+    ImgHdr_LineStop           = header_variables[6]
+    ImgHdr_Frame              = header_variables[7]
+
+    if (ImgHdr_Ident == 9) or (ImgHdr_Ident == 3):
+
+        tcspc_bin_resolution = 1e9*MeasDesc_Resolution          # in Nanoseconds
+        sync_rate            = np.ceil(MeasDesc_GlobalResolution*1e9)  # in Nanoseconds
+
+#             num_of_detectors     = np.max(channel)+1
+#             num_tcspc_channel    = np.max(tcspc)+1
+#             num_tcspc_channel    = floor(sync_rate/tcspc_bin_resolution)+1
+
+        num_of_detectors     = np.unique(channel).size 
+        num_tcspc_channel    = np.unique(tcspc).size
+        num_pixel_X          = ImgHdr_PixX
+        num_pixel_Y          = ImgHdr_PixY
+
+
+        flim_data_stack      = np.zeros((num_pixel_Y, num_pixel_X, num_of_detectors,num_tcspc_channel), dtype  = np.uint16)
+
+        # Markers necessary to make FLIM image stack
+        LineStartMarker = 2**(ImgHdr_LineStart-1)
+        LineStopMarker  = 2**(ImgHdr_LineStop-1)
+        FrameMarker     = 2**(ImgHdr_Frame-1)
+
+        # Get Number of Frames
+        FrameSyncVal    = sync[np.where(special == FrameMarker)]
+        num_of_Frames   = FrameSyncVal.size
+        print('num_of_Frames',num_of_Frames)
+        # read_data_range = np.where(sync == FrameSyncVal[num_of_Frames-1])[0][0]
+        read_data_range = np.where(sync == FrameSyncVal[num_of_Frames-1])[0][0]
+        print('read_data_range',read_data_range)
+        L1  = sync[np.where(special == LineStartMarker)] # Get Line start marker sync values
+        L2  = sync[np.where(special == LineStopMarker)]  # Get Line start marker sync values
+
+        syncPulsesPerLine = np.floor(np.mean(L2[10:] - L1[10:])) 
+
+#             Get pixel dwell time values from header for PicoQuant_FLIMBee or Zeiss_LSM scanner
+
+#             if 'StartedByRemoteInterface' in head.keys():
+
+#                 #syncPulsesPerLine  = round((head.TimePerPixel/head.MeasDesc_GlobalResolution)*num_pixel_X);
+#                 syncPulsesPerLine = np.floor(np.mean(L2[10:] - L1[10:])) 
+#             else:  
+#                 #syncPulsesPerLine  = floor(((head.ImgHdr_TimePerPixel*1e-3)/head.MeasDesc_GlobalResolution)*num_pixel_X);
+#                 syncPulsesPerLine = np.floor(np.mean(L2[10:] - L1[10:]))
+
+
+        # Initialize Variable
+        currentLine        = 0-lines_to_skip
+        realLine        = 0
+        currentSync        = 0
+        syncStart          = 0
+        currentPixel       = 0
+        unNoticed_events   = 0
+        countFrame         = 0
+        insideLine         = False
+        insideFrame        = False
+        isPhoton           = False
+
+        for event in range(read_data_range+1):
+
+            if num_of_Frames == 1:
+                # when only zero/one frame marker is present in TTTR file
+                insideFrame = True
+
+            currentSync    = sync[event]
+            special_event  = special[event]
+
+            # is the record a valid photon event or a special marker type event
+            if special[event] == 0:
+                isPhoton = True
+            else:
+                isPhoton = False
+
+            if not(isPhoton):         
+                #This is not needed once inside the first Frame marker
+                if (special_event == FrameMarker):
+                    
+#                     if countFrame==1:
+                        
+#                         break
+#                     else:
+#                         print(countFrame)
+                    # if countFrame!=num_of_Frames-1:
+                    #     pass
+                    # else:
+                    #     print(countFrame)
+                        # insideFrame  = True
+                    countFrame   += 1
+                    currentLine  = 0-lines_to_skip
+                    
+                    
+
+                if (special_event == LineStartMarker):
+                    # print('frame:',countFrame,'startline')
+                    insideLine = True
+                    if currentLine<0:
+                        # print('failed line',currentLine)
+                        insideFrame  = False
+                        
+                    else:
+                        insideFrame  = True
+                        # print('succes line',currentLine)
+                        syncStart  = currentSync
+                        
+
+                elif (special_event == LineStopMarker):
+                    # print('frame:',countFrame,'stopline')
+                    insideLine   = False
+                    currentLine  += 1
+                    syncStart    = 0 
+                    
+                    if (currentLine >= num_pixel_Y):
+                        insideFrame  = False
+                        currentLine  = 0-lines_to_skip
+
+            # Build FLIM image data stack here for N-spectral/tcspc-input channels
+
+            if (isPhoton and insideLine and insideFrame):
+                
+                currentPixel = int(np.floor((((currentSync - syncStart)/syncPulsesPerLine)*num_pixel_X)))
+                tmpchan   = channel[event]
+                tmptcspc  = tcspc[event]
+
+                if (currentPixel < num_pixel_X) and (tmptcspc<num_tcspc_channel) and (currentLine>=0):
+                    realLine=currentLine+3
+                    if realLine >= num_pixel_Y:
+                        realLine=realLine-num_pixel_Y
+                    flim_data_stack[realLine][currentPixel][tmpchan][tmptcspc] +=1
+#         else:        
+#             print("Piezo Scanner Data Reader Not Implemented Yet!!! \n")
+
+
+    return flim_data_stack
+
+
+
 
 
 class PTUreader():
@@ -360,15 +521,12 @@ class PTUreader():
     
         '''
         This function reads single-photon data from the file 's'
-
         Returns:
         sync    : number of the sync events that preceeded this detection event
         tcspc   : number of the tcspc-bin of the event
         chan    : number of the input channel of the event (detector-number)
         special : indicator of the event-type (0: photon; else : virtual photon)
         num     : counter of the records that were actually read
-
-
         '''
 
         record_type = self.rec_type_r[self.head['TTResultFormat_TTTRRecType']]
@@ -519,7 +677,8 @@ class PTUreader():
         if record_type in ['rtHydraHarp2T3','rtTimeHarp260PT3','rtMultiHarpNT3']:
             sync    = sync + (WRAPAROUND*np.cumsum(index*sync)) # For HydraHarp V1 and TimeHarp260 V1 overflow corrections 
         else:
-            sync    = sync + (WRAPAROUND*np.cumsum(index)) # correction for overflow to sync varibale
+            sync    = sync + (WRAPAROUND*np.cumsum(index).astype(np.uint64)) # correction for overflow to sync varibale
+            ## .astype(np.uint64) this code was added to aviod errors on Windows system 
 
         sync     = np.delete(sync, np.where(index == 1), axis = 0)
         tcspc    = np.delete(tcspc, np.where(index == 1), axis = 0)
@@ -562,17 +721,54 @@ class PTUreader():
         del self.sync, self.tcspc, self.channel , self.special
         
         flim_data_stack = get_flim_data_stack_static(sync, tcspc, channel, special, header_variables)
-        
         if flim_data_stack.ndim == 4:
             
             tmp_intensity_image  = np.sum(flim_data_stack, axis = 3) # sum across tcspc bin
+
             intensity_image      = np.sum(tmp_intensity_image, axis  = 2)# sum across spectral channels
             
         elif flim_data_stack.ndim == 3:
             
             intensity_image  = np.sum(flim_data_stack, axis = 3) # sum across tcspc bin, only 1 detection channel
+
+        return flim_data_stack, intensity_image, special,sync#,header_variables
+    
+    def get_flim_data_stack_omit(self,lines_to_omit): 
         
-        return flim_data_stack, intensity_image
+        # Check if it's FLIM image
+        if self.head["Measurement_SubMode"] == 0:
+            raise IOError("This is not a FLIM PTU file.!!! \n")
+            sys.exit()
+        elif (self.head["ImgHdr_Ident"] == 1) or (self.head["ImgHdr_Ident"] == 5):
+            raise IOError("Piezo Scanner Data Reader Not Implemented Yet!!! \n")
+            sys.exit()
+        else:
+        # Create numpy array of important variables to be passed into numba accelaratd get_flim_data_stack_static function
+        # as numba doesn't recognizes python dict type files
+        # Check
+
+            header_variables  = np.array([self.head["ImgHdr_Ident"], self.head["MeasDesc_Resolution"],self.head["MeasDesc_GlobalResolution"],self.head["ImgHdr_PixX"], self.head["ImgHdr_PixY"], self.head["ImgHdr_LineStart"],self.head["ImgHdr_LineStop"], self.head["ImgHdr_Frame"]],dtype = np.uint64)
+        
+        sync        = self.sync 
+        tcspc       = self.tcspc
+        channel     = self.channel 
+        special     = self.special 
+        
+        del self.sync, self.tcspc, self.channel , self.special
+        
+        flim_data_stack = get_flim_data_stack_static_omit(sync, tcspc, channel, special, header_variables,lines_to_omit)
+        if flim_data_stack.ndim == 4:
+            
+            tmp_intensity_image  = np.sum(flim_data_stack, axis = 3) # sum across tcspc bin
+
+            intensity_image      = np.sum(tmp_intensity_image, axis  = 2)# sum across spectral channels
+            
+        elif flim_data_stack.ndim == 3:
+            
+            intensity_image  = np.sum(flim_data_stack, axis = 3) # sum across tcspc bin, only 1 detection channel
+        # print(special)
+        # print(header_variables)
+        return flim_data_stack, intensity_image, special,sync#,header_variables
 
 @njit
 def get_lifetime_image(flim_data_stack,channel_number,timegating_start1,timegating_stop1,meas_resolution,estimated_irf):
