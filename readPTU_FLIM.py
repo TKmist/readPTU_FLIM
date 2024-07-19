@@ -52,7 +52,6 @@ from sys import getsizeof
 import gc
 import matplotlib.pyplot as plt
 from numba import njit, jit
-# from numba import jitclass
 from numba.experimental import jitclass 
 from numba.types import uint16
 
