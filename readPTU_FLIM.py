@@ -28,19 +28,7 @@ Aim : Open and convert Picoquant .ptu image files for FLIM analysis
  *  3) get_flim_data_stack class method is numba accelarated (using @jit decorator) to gain speed in building flim_data_stack from raw_tttr_data 
  
 """
-'''
-Modified by Tomasz Kalwarczyk tkalwarczyk@ichf.edu.pl  (https://github.com/TKmist)
-Modification:
-  Added function converting Picoquant .ptu image files acquired on the older A1 confocal setup with the PicoQuant LSM upgrade kit.
-  In this setup particular, the Nikon scanner produces additional 15 lines that the SymPhoTime software misinterprets,
-  causing a shift in the image and cutting off the bottom lines.
-  Function 
-      get_flim_data_stack_static_omit() 
-  is based on the 
-      get_flim_data_stack_static()
-  function, but takes additional lines_to_skip argument shifting the image up. After that operation,
-  the first lines are drawn at the bottom of the image. Those lines are shifted again to the top of the image.
-'''
+
 
 
 
